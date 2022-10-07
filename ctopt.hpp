@@ -110,6 +110,9 @@ namespace ctopt {
         template <typename T>
         concept IsVector = Container<T> && std::same_as<std::vector<typename T::value_type>, T>;
 
+        template <typename T>
+        concept IsArray = std::same_as<std::array<typename T::value_type, sizeof(T) / sizeof(typename T::value_type)>, T>;
+
         auto arg_type(std::string_view sv) noexcept {
             if (sv.starts_with("--")) {
                 return 2;
@@ -150,7 +153,7 @@ namespace ctopt {
             bool operator()(int which, std::string_view arg) noexcept;
 
             [[nodiscard]]
-            auto find_options(int type, std::string_view arg, std::string_view::size_type eq) noexcept -> std::optional<std::vector<const option*>> {
+            auto find_options(int type, std::string_view arg, std::string_view::size_type& eq) noexcept -> std::optional<std::vector<const option*>> {
                 using vector_type = std::vector<const option*>;
 
                 if (type == 2) {
@@ -188,6 +191,10 @@ namespace ctopt {
                     });
 
                     if (iter == cend(m_options)) {
+                        eq = std::distance(cbegin(shortopt), c);
+                        if (eq) {
+                            break;
+                        }
                         m_error.arg = std::string_view{c, 1};
                         return std::nullopt;
                     }
@@ -573,19 +580,33 @@ namespace ctopt {
                 if constexpr (std::constructible_from<std::string_view, T>) {
                     return T{std::cbegin(value), std::cend(value)};
                 }
+
+                const auto transformer = [](auto item) {
+                    using value_type = typename T::value_type;
+
+                    if constexpr (std::constructible_from<std::string_view, value_type>) {
+                        return value_type{item};
+                    } else {
+                        return from_string<value_type>(item);
+                    }
+                };
+
                 if constexpr (detail::IsVector<T>) {
                     T container{};
                     container.reserve(value.size());
-                    std::transform(std::cbegin(value), std::cend(value), std::back_inserter(container), [](auto item) {
-                        return from_string<typename T::value_type>(item);
-                    });
+                    std::transform(std::cbegin(value), std::cend(value), std::back_inserter(container), transformer);
                     return container;
+                } else if constexpr (detail::IsArray<T>) {
+                    std::vector<typename T::value_type> container{};
+                    container.reserve(value.size());
+                    std::transform(std::cbegin(value), std::cend(value), std::back_inserter(container), transformer);
+                    T arr{};
+                    std::copy(std::cbegin(container), std::cend(container), std::begin(arr));
+                    return arr;
                 } else {
                     std::vector<typename T::value_type> container{};
                     container.reserve(value.size());
-                    std::transform(std::cbegin(value), std::cend(value), std::back_inserter(container), [](auto item) {
-                        return from_string<typename T::value_type>(item);
-                    });
+                    std::transform(std::cbegin(value), std::cend(value), std::back_inserter(container), transformer);
                     return T{std::cbegin(container), std::cend(container)};
                 }
             } else if constexpr (std::is_pointer_v<T>) {
@@ -831,7 +852,7 @@ namespace ctopt {
                 return false;
             }
 
-            const auto eq = arg.find('=');
+            auto eq = arg.find('=');
             const auto options = find_options(type, arg, eq);
             if (!options.has_value()) {
                 m_error.which = which;
@@ -875,7 +896,19 @@ namespace ctopt {
                     m_pushedValues = 0;
                 }
 
-                return true;
+                if (eq != std::string_view::npos) {
+                    arg = arg.substr(eq + 1);
+
+                    if (arg.find(m_currentOption->m_separator) == std::string_view::npos) {
+                        // Immediate argument
+                        element_values[*m_currentOption].emplace_back(arg);
+                        m_currentOption = nullptr;
+                        m_pushedValues = 0;
+                        return true;
+                    }
+                } else {
+                    return true;
+                }
             }
         }
 
