@@ -45,7 +45,7 @@
  *     }
  *
  *     const auto verbose = args.get<bool>("verbose");
- *     if (verbose.value_or(false)) {
+ *     if (verbose) {
  *         // Print verbose output
  *         // ...
  *     }
@@ -60,79 +60,390 @@
 
 #include <algorithm>
 #include <array>
-#include <charconv>
+#include <cctype>
 #include <cstddef>
+#include <charconv>
+#include <concepts>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <string_view>
+#include <tuple>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace ctopt {
 
-    struct option;
-
     namespace detail {
 
-        template <typename T, typename To>
-        concept ConstructibleTo = std::constructible_from<To, T>;
+        template <typename T>
+        concept String = std::constructible_from<std::string_view, T>;
 
         template <typename T>
-        concept ArgKey = ConstructibleTo<T, std::string_view> || std::same_as<T, char>;
+        concept Array = std::same_as<std::array<typename T::value_type, sizeof(T) / sizeof(typename T::value_type)>, T>;
+
+        template <Array T>
+        inline constexpr auto array_size = sizeof(T) / sizeof(typename T::value_type);
 
         template <typename T>
-        concept Container = requires(T a, const T b) {
+        concept Optional = std::same_as<std::optional<typename T::value_type>, T>;
+
+        template <typename T>
+        concept Pair = std::same_as<std::pair<typename T::first_type, typename T::second_type>, T>;
+
+        template <typename T>
+        struct is_tuple : std::false_type {};
+
+        template <typename... T>
+        struct is_tuple<std::tuple<T...>> : std::true_type {};
+
+        template <typename T>
+        concept Tuple = is_tuple<T>::value;
+
+        template <typename T>
+        concept Numeric = std::is_arithmetic_v<T> && !std::is_same_v<T, bool> && !std::is_same_v<T, char>;
+
+        template <typename T>
+        concept Bool = std::same_as<T, bool>;
+
+        template <typename T>
+        concept StandardContainer = requires(T a, const T b) {
             requires std::regular<T>;
             requires std::swappable<T>;
             requires std::destructible<typename T::value_type>;
-            requires std::same_as<typename T::reference, typename T::value_type &>;
-            requires std::same_as<typename T::const_reference, const typename T::value_type &>;
             requires std::forward_iterator<typename T::iterator>;
             requires std::forward_iterator<typename T::const_iterator>;
             requires std::signed_integral<typename T::difference_type>;
             requires std::same_as<typename T::difference_type, typename std::iterator_traits<typename T::iterator>::difference_type>;
             requires std::same_as<typename T::difference_type, typename std::iterator_traits<typename T::const_iterator>::difference_type>;
-            { std::begin(a) } -> std::same_as<typename T::iterator>;
+            { a.begin() } -> std::same_as<typename T::iterator>;
             { a.end() } -> std::same_as<typename T::iterator>;
-            { b.begin() } -> std::same_as<typename T::const_iterator>;
-            { b.end() } -> std::same_as<typename T::const_iterator>;
-            { std::cbegin(a) } -> std::same_as<typename T::const_iterator>;
             { a.cbegin() } -> std::same_as<typename T::const_iterator>;
             { a.cend() } -> std::same_as<typename T::const_iterator>;
             { a.size() } -> std::same_as<typename T::size_type>;
             { a.max_size() } -> std::same_as<typename T::size_type>;
             { a.empty() } -> std::same_as<bool>;
+            { b.begin() } -> std::same_as<typename T::const_iterator>;
+            { b.end() } -> std::same_as<typename T::const_iterator>;
+        } && !Array<T>;
+
+        template <typename T>
+        concept ReservableContainer = requires(T a) {
+            { a.reserve(typename T::size_type{}) } -> std::same_as<void>;
+            { std::back_inserter(a) } -> std::same_as<std::back_insert_iterator<T>>;
         };
 
         template <typename T>
-        concept IsVector = Container<T> && std::same_as<std::vector<typename T::value_type>, T>;
+        concept ShrinkableContainer = requires(T a) {
+            { a.shrink_to_fit() } -> std::same_as<void>;
+        };
 
         template <typename T>
-        concept IsArray = std::same_as<std::array<typename T::value_type, sizeof(T) / sizeof(typename T::value_type)>, T>;
+        concept RangeConstructable = requires(std::vector<typename T::value_type> v) {
+            { T{std::cbegin(v), std::cend(v)} } -> std::same_as<T>;
+        };
 
-        auto arg_type(std::string_view sv) noexcept {
-            if (sv.starts_with("--")) {
-                return 2;
+        template <typename T>
+        concept Containable = std::same_as<const char*, T>
+                              || std::same_as<const std::string*, T>
+                              || RangeConstructable<T>
+                              || Array<T>
+                              || Optional<T>
+                              || Pair<T>
+                              || Tuple<T>;
+
+        template <typename T>
+        concept NotContainable = !Containable<T>;
+
+        template <std::size_t I, typename T>
+        struct containable_element;
+
+        template <std::size_t I, Tuple T>
+        struct containable_element<I, T> : std::tuple_element<I, T> {};
+
+        template <std::size_t I, Pair T>
+        struct containable_element<I, T> : std::conditional<I == 0, typename T::first_type,
+                std::conditional_t<I == 1, typename T::second_type, std::false_type>> {};
+
+        template <std::size_t I, Optional T>
+        struct containable_element<I, T> : std::conditional<I == 0, typename T::value_type, std::false_type> {};
+
+        template <std::size_t I, Array T>
+        struct containable_element<I, T> : std::conditional<(I < array_size<T>), typename T::value_type, std::false_type> {};
+
+        template <std::size_t I, std::same_as<const std::string*> T>
+        struct containable_element<I, T> : std::conditional<I == 0, const std::string, std::false_type> {};
+
+        template <std::size_t I, std::same_as<const char*> T>
+        struct containable_element<I, T> : std::conditional<I == 0, const char, std::false_type> {};
+
+        template <std::size_t I, StandardContainer T>
+        struct containable_element<I, T> {
+            using type = typename T::value_type;
+        };
+
+        template <std::size_t I, typename T>
+        using containable_element_t = typename containable_element<I, T>::type;
+
+        template <typename T>
+        struct containable_size;
+
+        template <Tuple T>
+        struct containable_size<T> : std::tuple_size<T> {};
+
+        template <Pair T>
+        struct containable_size<T> : std::integral_constant<std::size_t, 2> {};
+
+        template <Optional T>
+        struct containable_size<T> : std::integral_constant<std::size_t, 1> {};
+
+        template <Array T>
+        struct containable_size<T> : std::integral_constant<typename T::size_type, array_size<T>> {};
+
+        template <std::same_as<const std::string*> T>
+        struct containable_size<T> : std::integral_constant<std::size_t, 1> {};
+
+        template <std::same_as<const char*> T>
+        struct containable_size<T> : std::integral_constant<std::size_t, 1> {};
+
+        template <typename T>
+        inline constexpr auto containable_size_v = containable_size<T>::value;
+
+    } // detail
+
+    namespace {
+
+        /// Parse string to a boolean value
+        /// \tparam T Bool type
+        /// \param sv View into string
+        /// \return Boolean representation of string
+        template <detail::Bool T>
+        auto from_string(std::string_view sv) noexcept -> T {
+            if (sv.empty()) {
+                return false;
             }
-            if (sv.starts_with('-')) {
-                return 1;
+
+            std::string lower{};
+            lower.reserve(sv.size());
+            std::transform(sv.cbegin(), sv.cend(), std::back_inserter(lower), [](char c){
+                return std::tolower(c);
+            });
+
+            if (lower == "true" || lower == "on" || lower == "yes" || lower == "y") {
+                return true;
             }
-            return 0;
+
+            int value{};
+            auto [ptr, ec] { std::from_chars(sv.cbegin(), sv.cend(), value) };
+            if (ptr == sv.cend()) {
+                return bool(value);
+            }
+
+            return false;
+        }
+
+        /// Parse string to a numeric value
+        /// \tparam T Numeric type
+        /// \param sv View into string
+        /// \return Numeric representation of string
+        template <detail::Numeric T>
+        auto from_string(std::string_view sv) noexcept -> T {
+            if (sv.empty()) {
+                return {};
+            }
+
+            T value{};
+            auto [ptr, ec] { std::from_chars(sv.cbegin(), sv.cend(), value) };
+            if (ptr == sv.cend()) {
+                return value;
+            }
+
+            return {};
+        }
+
+        /// Parse string to a character value
+        /// \tparam T Numeric type
+        /// \param sv View into string
+        /// \return First character of string
+        template <std::same_as<char> T>
+        auto from_string(std::string_view sv) noexcept -> T {
+            if (sv.empty()) {
+                return 0;
+            }
+
+            return sv.front();
+        }
+
+        /// Construct view into string
+        /// \tparam T std::string_view
+        /// \param s String to view into
+        /// \return View into string
+        template <std::same_as<std::string_view> T>
+        auto from_string(const std::same_as<std::string> auto& s) noexcept -> T {
+            return std::string_view{s};
+        }
+
+        /// Get pointer to string
+        /// \tparam T const std::string*
+        /// \param s String to return pointer of
+        /// \return Pointer to string
+        template <std::same_as<const std::string*> T>
+        auto from_string(const std::same_as<std::string> auto& s) noexcept -> T {
+            return &s;
+        }
+
+        /// Get C-string pointer
+        /// \tparam T const char*
+        /// \param s String to return C-string data of
+        /// \return Pointer to C-string
+        template <std::same_as<const char*> T>
+        auto from_string(const std::string& s) noexcept -> T {
+            return s.c_str();
+        }
+    }
+
+    namespace detail {
+
+        template <typename T>
+        auto forward_arg(auto& rhs) noexcept {
+            if constexpr (String<T>) {
+                return rhs;
+            } else {
+                return from_string<T>(rhs);
+            }
+        }
+
+        template <std::size_t I = 0>
+        void tuple_insert(auto& tuple, auto it, auto end) noexcept {
+            using tuple_type = std::remove_cvref_t<decltype(tuple)>;
+            using element_type = containable_element_t<I, tuple_type>;
+
+            if (it == end) {
+                return;
+            }
+
+            std::get<I>(tuple) = forward_arg<element_type>(*it++);
+
+            if constexpr (I + 1 < containable_size_v<tuple_type>) {
+                tuple_insert<I + 1>(tuple, it, end);
+            }
+        }
+
+        template <Tuple T>
+        auto from_args(const std::vector<std::string>& v) noexcept -> T {
+            T t{};
+            tuple_insert(t, v.cbegin(), v.cend());
+            return t;
+        }
+
+        template <Pair T>
+        auto from_args(const std::vector<std::string>& v) noexcept -> T {
+            using first_type = typename T::first_type;
+            using second_type = typename T::second_type;
+
+            if (v.size() >= 2) {
+                return std::make_pair(
+                    forward_arg<first_type>(v.front()),
+                    forward_arg<second_type>(v.at(1))
+                );
+            }
+            if (v.size() == 1) {
+                return std::make_pair(
+                    forward_arg<first_type>(v.front()),
+                    second_type{}
+                );
+            }
+            return {};
+        }
+
+        template <Optional T>
+        auto from_args(const std::vector<std::string>& v) noexcept -> T {
+            if (v.empty()) {
+                return std::nullopt;
+            }
+
+            return forward_arg<typename T::value_type>(v.front());
+        }
+
+        template <Array T>
+        auto from_args(const std::vector<std::string>& v) noexcept -> T {
+            T t{};
+            if constexpr (std::same_as<std::string, typename T::value_type>) {
+                std::copy_n(v.cbegin(), containable_size_v<T>, t.begin());
+            } else {
+                std::generate_n(t.begin(), containable_size_v<T>, [it = v.cbegin()] mutable {
+                    return from_string<typename T::value_type>(*it++);
+                });
+            }
+            return t;
+        }
+
+        template <std::same_as<const std::string*> T>
+        auto from_args(const std::vector<std::string>& v) noexcept -> T {
+            if (v.empty()) {
+                return nullptr;
+            }
+
+            return v.data();
+        }
+
+        template <std::same_as<const char*> T>
+        auto from_args(const std::vector<std::string>& v) noexcept -> T {
+            if (v.empty()) {
+                return nullptr;
+            }
+
+            return v.front().c_str();
+        }
+
+        template <StandardContainer T>
+        auto from_args(const std::vector<std::string>& v) noexcept -> T {
+            if constexpr (std::same_as<std::vector<std::string>, T>) {
+                return v;
+            } else if constexpr (std::same_as<std::string, typename T::value_type> && RangeConstructable<T>) {
+                return T{v.cbegin(), v.cend()};
+            } else if constexpr (std::same_as<char, typename T::value_type>) {
+                T a{};
+                auto inserter = std::back_inserter(a);
+                for (const auto& s : v) {
+                    std::copy(s.cbegin(), s.cend(), inserter);
+                }
+                if constexpr (ShrinkableContainer<T>) {
+                    a.shrink_to_fit();
+                }
+                return a;
+            } else {
+                T a{};
+                if constexpr (ReservableContainer<T>) {
+                    a.reserve(v.size());
+                }
+                std::transform(v.cbegin(), v.cend(), std::back_inserter(a), [](const auto& str) {
+                    return from_string<typename T::value_type>(str);
+                });
+                return a;
+            }
+        }
+
+        template <NotContainable T>
+        auto from_args(const std::vector<std::string>& v) noexcept -> T {
+            return from_string<T>(v.front());
         }
 
         struct name_pair {
-            name_pair(const option& option) noexcept;
-
             auto operator<=>(const name_pair& rhs) const = default;
 
-            operator std::string_view() const noexcept {
+            [[nodiscard]]
+            auto printable() const noexcept -> std::string {
                 if (!long_name.empty()) {
-                    return long_name;
+                    return "--" + std::string{long_name};
                 }
-                return std::string_view{&short_name, 1};
+                return "-" + std::string{1, short_name};
             }
 
             const char short_name;
@@ -140,123 +451,14 @@ namespace ctopt {
         };
 
         template <std::size_t N>
-        struct parse_context {
-            struct error {
-                int which{};
-                std::string_view arg{};
-                std::string message{};
-            };
-
-            parse_context(const std::array<option, N>& options, bool longOnly) noexcept : m_options{options}, m_longOnly{longOnly} {}
-
-            [[nodiscard]]
-            bool operator()(int which, std::string_view arg) noexcept;
-
-            [[nodiscard]]
-            auto find_options(int type, std::string_view arg, std::string_view::size_type& eq) noexcept -> std::optional<std::vector<const option*>> {
-                using vector_type = std::vector<const option*>;
-
-                if (type == 2) {
-                    // Match long
-                    auto iter = std::find_if(cbegin(m_options), cend(m_options), [sv = arg.substr(2, eq - 2)](const auto& option) {
-                        return option.long_name == sv;
-                    });
-
-                    if (iter != cend(m_options)) {
-                        return vector_type{&*iter};
-                    }
-
-                    m_error.arg = arg;
-                    return std::nullopt;
-                }
-
-                const auto shortopt = arg.substr(1);
-
-                if (m_longOnly) {
-                    // Try to match long first
-                    auto iter = std::find_if(cbegin(m_options), cend(m_options), [shortopt](const auto& option) {
-                        return option.long_name == shortopt;
-                    });
-
-                    if (iter != cend(m_options)) {
-                        return vector_type{&*iter};
-                    }
-                }
-
-                auto options = vector_type{};
-
-                for (auto c = cbegin(shortopt); c != cend(shortopt); ++c) {
-                    auto iter = std::find_if(cbegin(m_options), cend(m_options), [c = *c](const auto& option) {
-                        return option.short_name == c;
-                    });
-
-                    if (iter == cend(m_options)) {
-                        eq = std::distance(cbegin(shortopt), c);
-                        if (eq) {
-                            break;
-                        }
-                        m_error.arg = std::string_view{c, 1};
-                        return std::nullopt;
-                    }
-
-                    options.push_back(&*iter);
-                }
-
-                return options;
-            }
-
-            [[nodiscard]]
-            std::string error_str() const noexcept {
-                auto oss = std::ostringstream{};
-                oss << std::string{m_error.message} + ": " + std::string{m_error.arg};
-                if (m_error.which) {
-                    oss << " (at " + std::to_string(m_error.which) + ")";
-                }
-                return oss.str();
-            };
-
-            [[nodiscard]]
-            bool shrink_to_fit() noexcept {
-                for (const auto& [key, value] : flag_counter) {
-                    element_values[key].emplace_back(std::to_string(value));
-                }
-                for (const auto& option : m_options) {
-                    if (!option.m_defaultValue.empty() && !element_values.contains(option)) {
-                        element_values[option].emplace_back(option.m_defaultValue);
-                    }
-                    if (option.m_required && !element_values.contains(option)) {
-                        m_error.message = std::string{"Missing required option '"} + std::string{name_pair{option}} + '\'';
-                        m_error.which = -1;
-                        return false;
-                    }
-                }
-                for (auto& [key, value] : element_values) {
-                    value.shrink_to_fit();
-                }
-                positional_values.shrink_to_fit();
-                return true;
-            }
-
-            std::map<name_pair, std::vector<std::string>> element_values;
-            std::map<name_pair, std::size_t> flag_counter;
-            std::vector<std::string> positional_values;
-        private:
-            const std::array<option, N>& m_options;
-            const bool m_longOnly{};
-            const option* m_currentOption{};
-            std::size_t m_pushedValues{};
-            error m_error{};
-        };
+        struct parse_context;
 
     } // namespace detail
 
+    template <std::size_t N>
+    struct parser;
+
     struct option {
-        template <std::size_t N>
-        friend struct detail::parse_context;
-
-        template <std::size_t N>
-        friend struct parser;
-
         /// Short-option with the form -a -b -c
         /// \param shortopt Character to use as a short option
         consteval explicit option(char shortopt) noexcept : short_name{shortopt} {}
@@ -302,7 +504,7 @@ namespace ctopt {
         /// \param _ String
         /// \return Next builder
         [[nodiscard]]
-        consteval option help_text(detail::ConstructibleTo<std::string_view> auto _) const noexcept {
+        consteval option help_text(detail::String auto _) const noexcept {
             auto builder = option{*this};
             builder.m_helpText = _;
             return builder;
@@ -312,7 +514,7 @@ namespace ctopt {
         /// \param _ String
         /// \return Next builder
         [[nodiscard]]
-        consteval option meta(detail::ConstructibleTo<std::string_view> auto _) const noexcept {
+        consteval option meta(detail::String auto _) const noexcept {
             auto builder = option{*this};
             builder.m_meta = _;
             return builder;
@@ -322,7 +524,7 @@ namespace ctopt {
         /// \param _ String
         /// \return Next builder
         [[nodiscard]]
-        consteval option default_value(detail::ConstructibleTo<std::string_view> auto _) const noexcept {
+        consteval option default_value(detail::String auto _) const noexcept {
             auto builder = option{*this};
             builder.m_defaultValue = _;
             return builder;
@@ -351,6 +553,19 @@ namespace ctopt {
         const char short_name{};
         const std::string_view long_name{};
     private:
+        friend struct args;
+
+        template <std::size_t N>
+        friend struct parser;
+
+        template <std::size_t N>
+        friend struct detail::parse_context;
+
+        [[nodiscard]]
+        auto name_pair() const noexcept {
+            return detail::name_pair{short_name, long_name};
+        }
+
         std::size_t m_min{0};
         std::size_t m_max{1};
         std::string_view m_helpText{};
@@ -361,62 +576,10 @@ namespace ctopt {
         bool m_required{};
     };
 
-    namespace {
-
-        /// Parse string to a boolean value
-        /// \tparam T bool
-        /// \param sv String
-        /// \return bool representation of string
-        template <std::same_as<bool> T>
-        auto from_string(std::string_view sv) noexcept -> T {
-            if (sv.empty()) {
-                return true;
-            }
-
-            std::string lower;
-            std::transform(cbegin(sv), cend(sv), std::back_inserter(lower), [](char c){
-                return std::tolower(c);
-            });
-
-            if (lower == "on" || lower == "yes" || lower == "true" || lower == "y") {
-                return true;
-            }
-
-            int value{};
-            auto [ptr, ec] { std::from_chars(cbegin(sv), cend(sv), value) };
-            if (ptr == cend(sv)) {
-                return bool(value);
-            }
-
-            return false;
-        }
-
-        /// Parse string to a numeric value
-        /// \tparam T Number
-        /// \param sv String
-        /// \return Numeric representation of string
-        template <typename T> requires (std::integral<T> || std::floating_point<T>) && (!std::is_same_v<T, bool>)
-        auto from_string(std::string_view sv) noexcept -> T {
-            if (sv.empty()) {
-                return 0;
-            }
-
-            T value{};
-            auto [ptr, ec] { std::from_chars(cbegin(sv), cend(sv), value) };
-            if (ptr == cend(sv)) {
-                return value;
-            }
-
-            return 0;
-        }
-
-    } // namespace
+    template <std::size_t N>
+    struct parser;
 
     struct args {
-    private:
-        template <std::size_t N>
-        friend struct parser;
-    public:
         using size_type = std::size_t;
 
         struct const_iterator {
@@ -476,6 +639,7 @@ namespace ctopt {
                 m_iter += i;
                 return *this;
             }
+
         private:
             const_iterator(const vector_type& args, vector_type::const_iterator iter) noexcept : m_args{&args}, m_iter{iter} {}
 
@@ -485,55 +649,40 @@ namespace ctopt {
 
         using iterator = const_iterator;
 
-        /// Const iterator to the beginning of positional values
-        /// \return iterator
-        [[nodiscard]]
-        const_iterator cbegin() const noexcept {
-            return const_iterator{m_positionalValues, std::cbegin(m_positionalValues)};
+        /// Retrieve option value
+        /// \tparam T type to parse option into
+        /// \param _ Short-opt key (char)
+        /// \return T
+        template <typename T>
+        auto get(char shortName) const noexcept {
+            return get_if<T>([shortName](const auto& keyValues) {
+                return std::get<0>(keyValues).short_name == shortName;
+            });
         }
 
-        /// Const iterator to the end of positional values
-        /// \return iterator
-        [[nodiscard]]
-        const_iterator cend() const noexcept {
-            return const_iterator{m_positionalValues, std::cend(m_positionalValues)};
-        }
-
-        /// Iterator to the beginning of positional values
-        /// \return iterator
-        [[nodiscard]]
-        iterator begin() const noexcept {
-            return iterator{m_positionalValues, std::cbegin(m_positionalValues)};
-        }
-
-        /// Iterator to the end of positional values
-        /// \return iterator
-        [[nodiscard]]
-        iterator end() const noexcept {
-            return iterator{m_positionalValues, std::cend(m_positionalValues)};
+        /// Retrieve option value
+        /// \tparam T type to parse option into
+        /// \param _ Long-opt key (string)
+        /// \return T
+        template <typename T>
+        auto get(std::string_view longName) const noexcept {
+            return get_if<T>([longName](const auto& keyValues) {
+                return std::get<0>(keyValues).long_name == longName;
+            });
         }
 
         /// Test if args has an error
         /// \return false if there is an error
         [[nodiscard]]
         explicit operator bool() const noexcept {
-            return m_errorMessage.empty();
+            return std::holds_alternative<data_type>(m_data);
         }
 
-        /// Error string
-        /// \return Empty string if no error
+        /// Error string (use operator bool() first to check for an error)
+        /// \return Error string, if there is an error
         [[nodiscard]]
         const auto& error_str() const noexcept {
-            return m_errorMessage;
-        }
-
-        /// Return a transforming iterator that returns value as T
-        /// \tparam T type to transform to
-        /// \return iterator
-        template <typename T>
-        [[nodiscard]]
-        auto transform() const noexcept {
-            return transform_iterator<T>(this);
+            return std::get<std::string>(m_data);
         }
 
         /// Access positional argument
@@ -543,99 +692,51 @@ namespace ctopt {
         template <typename T>
         [[nodiscard]]
         auto at(std::integral auto _) const noexcept {
-            auto iter = cbegin();
-            iter += _;
-            return iter.value<T>();
+            return positional().at(_);
         }
 
         /// Number of positional arguments
         /// \return Number
         [[nodiscard]]
         auto size() const noexcept {
-            return m_positionalValues.size();
+            return positional().size();
         }
 
-        /// Retrieve option value
-        /// \tparam T type to parse option into
-        /// \param _ Either short-opt key (char) or long-opt key (string)
-        /// \return std::optional<T> for single values, nullable T* for pointers, Container<T> for standard containers
+        /// Const iterator to the beginning of positional values
+        /// \return iterator
+        [[nodiscard]]
+        const_iterator cbegin() const noexcept {
+            return const_iterator{positional(), positional().cbegin()};
+        }
+
+        /// Const iterator to the end of positional values
+        /// \return iterator
+        [[nodiscard]]
+        const_iterator cend() const noexcept {
+            return const_iterator{positional(), positional().cend()};
+        }
+
+        /// Iterator to the beginning of positional values
+        /// \return iterator
+        [[nodiscard]]
+        iterator begin() const noexcept {
+            return iterator{positional(), positional().begin()};
+        }
+
+        /// Iterator to the end of positional values
+        /// \return iterator
+        [[nodiscard]]
+        iterator end() const noexcept {
+            return iterator{positional(), positional().end()};
+        }
+
+        /// Return a transforming iterator that returns value as T
+        /// \tparam T type to make_key_values to
+        /// \return iterator
         template <typename T>
         [[nodiscard]]
-        auto get(detail::ArgKey auto _) const noexcept -> std::conditional_t<std::is_pointer_v<T> || (detail::Container<T> && (!std::constructible_from<std::string_view, T>)), T, std::optional<T>> {
-            const auto iter = std::find_if(std::cbegin(m_elementValues), std::cend(m_elementValues), [_](const auto& p) {
-                const auto& [key, value] {p};
-                if constexpr (std::is_same_v<decltype(_), char>) {
-                    return key.short_name == _;
-                } else {
-                    return key.long_name == _;
-                }
-            });
-
-            if constexpr (detail::Container<T> && !std::constructible_from<std::string_view, T>) {
-                if (iter == std::cend(m_elementValues)) {
-                    return T{}; // Empty container
-                }
-
-                const auto& [key, value] {*iter};
-                if constexpr (std::constructible_from<std::string_view, T>) {
-                    return T{std::cbegin(value), std::cend(value)};
-                }
-
-                const auto transformer = [](auto item) {
-                    using value_type = typename T::value_type;
-
-                    if constexpr (std::constructible_from<std::string_view, value_type>) {
-                        return value_type{item};
-                    } else {
-                        return from_string<value_type>(item);
-                    }
-                };
-
-                if constexpr (detail::IsVector<T>) {
-                    T container{};
-                    container.reserve(value.size());
-                    std::transform(std::cbegin(value), std::cend(value), std::back_inserter(container), transformer);
-                    return container;
-                } else if constexpr (detail::IsArray<T>) {
-                    std::vector<typename T::value_type> container{};
-                    container.reserve(value.size());
-                    std::transform(std::cbegin(value), std::cend(value), std::back_inserter(container), transformer);
-                    T arr{};
-                    std::copy(std::cbegin(container), std::cend(container), std::begin(arr));
-                    return arr;
-                } else {
-                    std::vector<typename T::value_type> container{};
-                    container.reserve(value.size());
-                    std::transform(std::cbegin(value), std::cend(value), std::back_inserter(container), transformer);
-                    return T{std::cbegin(container), std::cend(container)};
-                }
-            } else if constexpr (std::is_pointer_v<T>) {
-                if (iter == std::cend(m_elementValues)) {
-                    return nullptr;
-                }
-
-                using element_type = std::remove_cvref_t<typename std::pointer_traits<T>::element_type>;
-
-                const auto& [key, value] {*iter};
-                if constexpr (std::is_same_v<element_type, char>) {
-                    return value.at(0).c_str();
-                } else if constexpr (std::is_same_v<element_type, std::string>) {
-                    return &value.at(0);
-                } else {
-                    throw std::invalid_argument("Pointer type not returnable");
-                }
-            } else {
-                if (iter == std::cend(m_elementValues)) {
-                    return std::nullopt;
-                }
-
-                const auto& [key, value] {*iter};
-                if constexpr (std::constructible_from<std::string_view, T>) {
-                    return T{value.at(0)};
-                } else {
-                    return from_string<T>(value.at(0));
-                }
-            }
+        auto transform() const noexcept {
+            return transform_iterator<T>(this);
         }
 
         template <typename T>
@@ -646,7 +747,7 @@ namespace ctopt {
             struct const_iterator {
             public:
                 auto operator*() const noexcept {
-                    return m_iter.template value<value_type>();
+                    return m_iter.value<value_type>();
                 }
 
                 [[nodiscard]]
@@ -710,16 +811,289 @@ namespace ctopt {
             const args* m_args;
         };
     private:
-        explicit args(std::string errorMessage) noexcept : m_errorMessage{std::move(errorMessage)} {}
+        template <std::size_t N>
+        friend struct parser;
+
+        struct data_type {
+            const std::map<detail::name_pair, std::vector<std::string>> key_value;
+            const std::vector<std::string> positional;
+        };
+
+        static auto make_key_values(const std::map<const option*, std::vector<std::string>>& map) noexcept {
+            std::map<detail::name_pair, std::vector<std::string>> result;
+            for (const auto& [key, values] : map) {
+                result[key->name_pair()] = values;
+            }
+            return result;
+        }
+
+        [[nodiscard]]
+        auto key_value() const noexcept -> const std::map<detail::name_pair, std::vector<std::string>>& {
+            return std::get<data_type>(m_data).key_value;
+        }
+
+        [[nodiscard]]
+        auto positional() const noexcept -> const std::vector<std::string>& {
+            return std::get<data_type>(m_data).positional;
+        }
+
+        template <typename T>
+        auto get_if(auto predicate) const noexcept {
+            const auto& keyValue = key_value();
+            auto iter = std::find_if(keyValue.cbegin(), keyValue.cend(), predicate);
+            if (iter == keyValue.cend()) {
+                return T{};
+            }
+            return detail::from_args<T>(std::get<1>(*iter));
+        }
 
         template <std::size_t N>
-        explicit args(const detail::parse_context<N>& ctx) noexcept :
-                m_elementValues{ctx.element_values}, m_positionalValues{ctx.positional_values} {}
+        explicit args(const detail::parse_context<N>& parseContext) noexcept :
+            m_data{data_type{
+                make_key_values(parseContext.m_elementValues),
+                parseContext.m_positionalValues
+            }} {}
 
-        const std::string m_errorMessage {};
-        const std::map<detail::name_pair, std::vector<std::string>> m_elementValues {};
-        const std::vector<std::string> m_positionalValues {};
+        explicit args(std::string&& errorStr) noexcept : m_data{errorStr} {}
+
+        std::variant<data_type, std::string> m_data;
     };
+
+    template <std::size_t N>
+    struct parser;
+
+    namespace detail {
+
+        template <std::size_t N>
+        auto get_long_option(const std::array<option, N>& options, std::string_view key) noexcept -> std::pair<const option*, std::string_view> {
+            for (const auto& option : options) {
+                const auto keyEnd = key.find_first_not_of(option.long_name);
+                if (keyEnd == std::string_view::npos) {
+                    // Only key
+                    return std::make_pair(&option, std::string_view{});
+                }
+
+                if (keyEnd != option.long_name.size()) {
+                    continue;
+                }
+
+                if (key[keyEnd] == '=') {
+                    return std::make_pair(&option, key.substr(keyEnd + 1));
+                }
+            }
+
+            return std::make_pair(nullptr, std::string_view{});
+        }
+
+        template <std::size_t N>
+        auto get_short_options(const std::array<option, N>& options, std::string_view key) noexcept -> std::pair<std::vector<const option*>, std::string_view> {
+            std::vector<const option*> opts;
+
+            for (std::string_view::size_type ii = 0; ii < key.size(); ++ii) {
+                auto iter = std::find_if(options.cbegin(), options.cend(), [k = key[ii]](const auto& option) {
+                    return option.short_name == k;
+                });
+
+                if (iter == options.cend()) {
+                    return std::make_pair(opts, key.substr(ii));
+                }
+
+                opts.push_back(&*iter);
+            }
+
+            return std::make_pair(opts, std::string_view{});
+        }
+
+        template <std::size_t N>
+        struct parse_context {
+        private:
+            friend struct parser<N>;
+            friend struct ctopt::args;
+
+            parse_context(const std::array<option, N>& options, bool longOnly) noexcept : m_options{options}, m_longOnly{longOnly} {}
+
+            [[nodiscard]]
+            bool operator()(std::string_view arg) noexcept {
+                if (m_currentOption) {
+                    // Expecting value
+                    if (m_currentOption->m_max > 1 && !m_currentOption->m_flagCounter) {
+                        auto& values = m_elementValues[m_currentOption];
+                        values.emplace_back(arg);
+                        if (values.size() == m_currentOption->m_max) {
+                            m_currentOption = nullptr;
+                        }
+                        return true;
+                    }
+                    return on_arg(arg);
+                }
+
+                // Expecting key
+                const auto type = std::min(arg.find_first_not_of('-'), std::string_view::size_type{2});
+
+                if (type == 1) {
+                    const auto key = arg.substr(1);
+
+                    if (m_longOnly) {
+                        // First try parsing a long option
+                        std::tie(m_currentOption, arg) = get_long_option(m_options, key);
+                    }
+
+                    if (!m_currentOption) {
+                        // Parse short option
+                        std::vector<const option*> shortOptions;
+                        std::tie(shortOptions, arg) = get_short_options(m_options, key);
+                        if (!shortOptions.empty()) {
+                            m_currentOption = shortOptions.back();
+                            shortOptions.pop_back();
+
+                            for (const auto& shortOpt: shortOptions) {
+                                on_popcount_arg(shortOpt);
+                            }
+                        }
+                    }
+                } else if (type == 2) {
+                    // Parse long option
+                    std::tie(m_currentOption, arg) = get_long_option(m_options, arg.substr(2));
+                } else {
+                    // arg is a positional value
+                    on_positional_arg(arg);
+                    return true;
+                }
+
+                if (m_currentOption) {
+                    if (m_currentOption->m_flagCounter) {
+                        // We can immediately handle flag counters
+                        m_counterValues[m_currentOption] += 1;
+                        m_currentOption = nullptr;
+                    } else if (!arg.empty() && !on_arg(arg)) {
+                        return false;
+                    }
+
+                    return true;
+                }
+
+                m_errorString = "Unknown option: " + std::string{arg};
+                return false;
+            }
+
+            [[nodiscard]]
+            bool finish() noexcept {
+                if (m_currentOption) {
+                    on_popcount_arg(m_currentOption);
+                    m_currentOption = nullptr;
+                }
+
+                for (const auto& [key, value] : m_counterValues) {
+                    m_elementValues[key].push_back(std::to_string(value));
+                }
+
+                for (auto& [key, values] : m_elementValues) {
+                    if (values.size() < key->m_min) {
+                        if (key->m_meta.empty()) {
+                            m_errorString = "No arg given for " + key->name_pair().printable();
+                        } else {
+                            m_errorString = "No " + std::string{key->m_meta} + " given for " + key->name_pair().printable();
+                        }
+                        return false;
+                    }
+                    if (values.size() > key->m_max) {
+                        m_errorString = "Unknown option for " + key->name_pair().printable() + ": " + values[key->m_max];
+                        return false;
+                    }
+
+                    values.shrink_to_fit();
+                }
+
+                for (const auto& option : m_options) {
+                    if (option.m_required && !m_elementValues.contains(&option)) {
+                        m_errorString = "Missing required option: " + option.name_pair().printable();
+                        return false;
+                    }
+                }
+
+                m_positionalValues.shrink_to_fit();
+                return true;
+            }
+
+            [[nodiscard]]
+            bool on_arg(std::string_view arg) noexcept {
+                if (m_currentOption->m_flagCounter) {
+                    // Flag counters don't take arguments
+                    m_counterValues[m_currentOption] += 1;
+                    on_positional_arg(arg);
+                } else if (!on_map_arg(arg)) {
+                    return false;
+                }
+
+                m_currentOption = nullptr;
+                return true;
+            }
+
+            void on_popcount_arg(const option* key) noexcept {
+                if (key->m_flagCounter) {
+                    m_counterValues[key] += 1;
+                    return;
+                }
+
+                if (m_elementValues.contains(key)) {
+                    return;
+                }
+
+                m_elementValues[key].emplace_back("true");
+            }
+
+            [[nodiscard]]
+            bool on_map_arg(std::string_view arg) noexcept {
+                if (m_currentOption->m_flagCounter) {
+                    m_counterValues[m_currentOption] += 1;
+                } else {
+                    auto& values = m_elementValues[m_currentOption];
+
+                    if (m_currentOption->m_separator) {
+                        // Error if we're doing separators beyond max args
+                        std::size_t begin = 0;
+                        while (begin < arg.size()) {
+                            if (values.size() == m_currentOption->m_max) {
+                                m_errorString = "Unknown option for " + m_currentOption->name_pair().printable() + ": " + std::string{arg.substr(begin)};
+                                return false;
+                            }
+
+                            auto end = arg.find_first_of(m_currentOption->m_separator, begin);
+                            if (end == std::string_view::npos) {
+                                values.emplace_back(arg.substr(begin));
+                                break;
+                            } else {
+                                values.emplace_back(arg.substr(begin, end - begin));
+                                begin = end + 1;
+                            }
+                        }
+                    } else {
+                        values.emplace_back(arg);
+                    }
+                }
+
+                return true;
+            }
+
+            void on_positional_arg(std::string_view arg) noexcept {
+                m_positionalValues.emplace_back(arg);
+            }
+
+            auto& error_str() noexcept {
+                return m_errorString;
+            }
+
+            const std::array<option, N>& m_options;
+            const bool m_longOnly;
+
+            const option* m_currentOption{nullptr};
+            std::map<const option*, std::size_t> m_counterValues {};
+            std::map<const option*, std::vector<std::string>> m_elementValues {};
+            std::vector<std::string> m_positionalValues {};
+            std::string m_errorString;
+        };
+
+    } // namespace detail
 
     template <std::size_t N>
     struct parser {
@@ -743,14 +1117,16 @@ namespace ctopt {
                     break; // Stop parsing
                 }
 
-                const auto isGood = ctx(ii, arg);
+                const auto isGood = ctx(arg);
                 if (!isGood) {
-                    return args{ctx.error_str()};
+                    return args{std::move(ctx.error_str())};
                 }
             }
-            if (!ctx.shrink_to_fit()) {
-                return args{ctx.error_str()};
+
+            if (!ctx.finish()) {
+                return args{std::move(ctx.error_str())};
             }
+
             return args{ctx};
         }
 
@@ -837,129 +1213,6 @@ namespace ctopt {
     template <typename... Opts>
     consteval auto make_options(Opts... _) noexcept {
         return parser<sizeof...(Opts)>{std::forward<Opts>(_)...};
-    }
-
-    detail::name_pair::name_pair(const option& option) noexcept : short_name{option.short_name}, long_name{option.long_name} {}
-
-    template <std::size_t N>
-    bool detail::parse_context<N>::operator()(int which, std::string_view arg) noexcept {
-        const auto type = detail::arg_type(arg);
-
-        if (type) {
-            if (m_currentOption && m_pushedValues < m_currentOption->m_min) {
-                m_error.which = which;
-                m_error.message = "Expected value";
-                return false;
-            }
-
-            auto eq = arg.find('=');
-            const auto options = find_options(type, arg, eq);
-            if (!options.has_value()) {
-                m_error.which = which;
-                m_error.message = "Unknown option";
-                return false;
-            }
-
-            if (type == 2 && eq != std::string_view::npos) {
-                if (m_currentOption) {
-                    if (m_currentOption->m_flagCounter) {
-                        flag_counter[*m_currentOption] += 1;
-                    } else {
-                        auto iter = element_values.find(*m_currentOption);
-                        if (iter == cend(element_values)) {
-                            element_values[*m_currentOption].emplace_back();
-                        }
-                    }
-                }
-
-                arg = arg.substr(eq + 1);
-                if (arg.empty()) {
-                    m_currentOption = nullptr;
-                } else {
-                    m_currentOption = options->front();
-                }
-                m_pushedValues = 0;
-            } else {
-                for (const auto& option: *options) {
-                    if (m_currentOption) {
-                        if (m_currentOption->m_flagCounter) {
-                            flag_counter[*m_currentOption] += 1;
-                        } else {
-                            auto iter = element_values.find(*m_currentOption);
-                            if (iter == cend(element_values)) {
-                                element_values[*m_currentOption].emplace_back();
-                            }
-                        }
-                    }
-
-                    m_currentOption = option;
-                    m_pushedValues = 0;
-                }
-
-                if (eq != std::string_view::npos) {
-                    arg = arg.substr(eq + 1);
-
-                    if (arg.find(m_currentOption->m_separator) == std::string_view::npos) {
-                        // Immediate argument
-                        element_values[*m_currentOption].emplace_back(arg);
-                        m_currentOption = nullptr;
-                        m_pushedValues = 0;
-                        return true;
-                    }
-                } else {
-                    return true;
-                }
-            }
-        }
-
-        if (m_currentOption && m_currentOption->m_flagCounter) {
-            m_error.which = which;
-            m_error.message = "Option is flag counter";
-            return false;
-        }
-
-        if (m_currentOption && m_pushedValues == m_currentOption->m_max) {
-            // Reached maximum expected values
-            positional_values.emplace_back(arg);
-            m_currentOption = nullptr;
-            m_pushedValues = 0;
-        } else if (!m_currentOption) {
-            positional_values.emplace_back(arg);
-        } else {
-            if (m_currentOption && m_currentOption->m_separator && arg.find(m_currentOption->m_separator) != std::string_view::npos) {
-                const auto key = name_pair{*m_currentOption};
-
-                std::size_t pos = 0;
-                std::size_t end = arg.find_first_of(m_currentOption->m_separator);
-                while (true) {
-                    if (m_pushedValues == m_currentOption->m_max) {
-                        m_error.which = which;
-                        m_error.message = "Too many values";
-                        return false;
-                    }
-
-                    auto innerArg = arg.substr(pos, end - pos);
-                    element_values[key].emplace_back(innerArg);
-
-                    if (end == std::string_view::npos) {
-                        break;
-                    }
-
-                    m_pushedValues += 1;
-
-                    pos = end + 1;
-                    end = arg.find_first_of(m_currentOption->m_separator, pos);
-                }
-
-                m_currentOption = nullptr;
-                m_pushedValues = 0;
-            } else {
-                element_values[*m_currentOption].emplace_back(arg);
-                m_pushedValues += 1;
-            }
-        }
-
-        return true;
     }
 
 } // namespace ctopt

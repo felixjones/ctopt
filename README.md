@@ -49,7 +49,7 @@ int main(int argc, char* argv[]) {
   }
 
   const auto verbose = args.get<bool>("verbose");
-  if (verbose.value_or(false)) {
+  if (verbose) {
     // Print verbose output
     // ...
   }
@@ -112,7 +112,7 @@ int main(int argc, char* argv[]) {
 
   for (auto ii = 0u; ii < args.size(); ++ii) {
     // Iterate index style
-    auto num = args.at<int>(i);
+    auto num = args.at<int>(ii);
   }
 
   for (auto num : args.transform<int>()) {
