@@ -1005,9 +1005,17 @@ namespace ctopt {
                 }
 
                 for (const auto& option : m_options) {
-                    if (option.m_required && !m_elementValues.contains(&option)) {
+                    if (m_elementValues.contains(&option)) {
+                        continue;
+                    }
+
+                    if (option.m_required) {
                         m_errorString = "Missing required option: " + option.name_pair().printable();
                         return false;
+                    }
+
+                    if (!option.m_defaultValue.empty()) {
+                        m_elementValues.emplace(&option, std::vector<std::string>(1, std::string{option.m_defaultValue}));
                     }
                 }
 
