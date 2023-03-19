@@ -349,14 +349,14 @@ namespace ctopt {
 
             if (v.size() >= 2) {
                 return std::make_pair(
-                    forward_arg<first_type>(v.front()),
-                    forward_arg<second_type>(v.at(1))
+                        forward_arg<first_type>(v.front()),
+                        forward_arg<second_type>(v.at(1))
                 );
             }
             if (v.size() == 1) {
                 return std::make_pair(
-                    forward_arg<first_type>(v.front()),
-                    second_type{}
+                        forward_arg<first_type>(v.front()),
+                        second_type{}
                 );
             }
             return {};
@@ -450,12 +450,12 @@ namespace ctopt {
             const std::string_view long_name;
         };
 
-        template <std::size_t N>
+        template <bool NoError, std::size_t N>
         struct parse_context;
 
     } // namespace detail
 
-    template <std::size_t N>
+    template <bool NoError, std::size_t N>
     struct parser;
 
     struct option {
@@ -555,7 +555,7 @@ namespace ctopt {
     private:
         friend struct args;
 
-        template <std::size_t N>
+        template <bool NoError, std::size_t N>
         friend struct parser;
 
         template <std::size_t N>
@@ -576,7 +576,7 @@ namespace ctopt {
         bool m_required{};
     };
 
-    template <std::size_t N>
+    template <bool NoError, std::size_t N>
     struct parser;
 
     struct args {
@@ -811,7 +811,7 @@ namespace ctopt {
             const args* m_args;
         };
     private:
-        template <std::size_t N>
+        template <bool NoError, std::size_t N>
         friend struct parser;
 
         struct data_type {
@@ -847,19 +847,19 @@ namespace ctopt {
             return detail::from_args<T>(std::get<1>(*iter));
         }
 
-        template <std::size_t N>
-        explicit args(const detail::parse_context<N>& parseContext) noexcept :
-            m_data{data_type{
-                make_key_values(parseContext.m_elementValues),
-                parseContext.m_positionalValues
-            }} {}
+        template <bool NoError, std::size_t N>
+        explicit args(const detail::parse_context<NoError, N>& parseContext) noexcept :
+                m_data{data_type{
+                        make_key_values(parseContext.m_elementValues),
+                        parseContext.m_positionalValues
+                }} {}
 
         explicit args(std::string&& errorStr) noexcept : m_data{errorStr} {}
 
         std::variant<data_type, std::string> m_data;
     };
 
-    template <std::size_t N>
+    template <bool NoError, std::size_t N>
     struct parser;
 
     namespace detail {
@@ -904,16 +904,19 @@ namespace ctopt {
             return std::make_pair(opts, std::string_view{});
         }
 
-        template <std::size_t N>
+        template <bool NoError, std::size_t N>
         struct parse_context {
         private:
-            friend struct parser<N>;
+            friend struct parser<NoError, N>;
             friend struct ctopt::args;
 
             parse_context(const std::array<option, N>& options, bool longOnly) noexcept : m_options{options}, m_longOnly{longOnly} {}
 
             [[nodiscard]]
             bool operator()(std::string_view arg) noexcept {
+                [[maybe_unused]]
+                const auto originalArg = arg;
+
                 if (m_currentOption) {
                     // Expecting value
                     if (m_currentOption->m_max > 1 && !m_currentOption->m_flagCounter) {
@@ -969,6 +972,12 @@ namespace ctopt {
                         return false;
                     }
 
+                    return true;
+                }
+
+                if constexpr (NoError) {
+                    // don't error for unknown args
+                    on_positional_arg(originalArg);
                     return true;
                 }
 
@@ -1103,7 +1112,7 @@ namespace ctopt {
 
     } // namespace detail
 
-    template <std::size_t N>
+    template <bool NoError, std::size_t N>
     struct parser {
         /// Construct parser with options
         /// \tparam Opts option type
@@ -1117,7 +1126,7 @@ namespace ctopt {
         /// \return args type
         [[nodiscard]]
         args operator()(int argc, char* argv[]) const noexcept {
-            detail::parse_context ctx{m_options, m_longOnly};
+            detail::parse_context<NoError, N> ctx{m_options, m_longOnly};
 
             for (int ii = 1; ii < argc; ++ii) {
                 const auto arg = std::string_view{argv[ii]};
@@ -1129,6 +1138,29 @@ namespace ctopt {
                 if (!isGood) {
                     return args{std::move(ctx.error_str())};
                 }
+            }
+
+            if (!ctx.finish()) {
+                return args{std::move(ctx.error_str())};
+            }
+
+            return args{ctx};
+        }
+
+        /// Parse positional arguments
+        /// \param begin Argument container begin
+        /// \param end Argument container end
+        /// \return args type
+        [[nodiscard]]
+        args operator()(args::const_iterator begin, args::const_iterator end) const noexcept {
+            detail::parse_context<NoError, N> ctx{m_options, m_longOnly};
+
+            while (begin != end) {
+                const auto isGood = ctx(*begin);
+                if (!isGood) {
+                    return args{std::move(ctx.error_str())};
+                }
+                ++begin;
             }
 
             if (!ctx.finish()) {
@@ -1220,7 +1252,16 @@ namespace ctopt {
     /// \return parser type
     template <typename... Opts>
     consteval auto make_options(Opts... _) noexcept {
-        return parser<sizeof...(Opts)>{std::forward<Opts>(_)...};
+        return parser<false, sizeof...(Opts)>{std::forward<Opts>(_)...};
+    }
+
+    /// Construct parser that retains unparsed args
+    /// \tparam Opts option type
+    /// \param _ Variadic list of options
+    /// \return parser type
+    template <typename... Opts>
+    consteval auto make_options_no_error(Opts... _) noexcept {
+        return parser<true, sizeof...(Opts)>{std::forward<Opts>(_)...};
     }
 
 } // namespace ctopt
