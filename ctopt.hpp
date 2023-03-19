@@ -240,8 +240,8 @@ namespace ctopt {
             }
 
             int value{};
-            auto [ptr, ec] { std::from_chars(sv.cbegin(), sv.cend(), value) };
-            if (ptr == sv.cend()) {
+            auto [ptr, ec] { std::from_chars(&sv.front(), &sv.back(), value) };
+            if (ptr == &sv.back()) {
                 return bool(value);
             }
 
@@ -377,7 +377,7 @@ namespace ctopt {
             if constexpr (std::same_as<std::string, typename T::value_type>) {
                 std::copy_n(v.cbegin(), containable_size_v<T>, t.begin());
             } else {
-                std::generate_n(t.begin(), containable_size_v<T>, [it = v.cbegin()] mutable {
+                std::generate_n(t.begin(), containable_size_v<T>, [it = v.cbegin()]() mutable {
                     return from_string<typename T::value_type>(*it++);
                 });
             }
