@@ -44,7 +44,7 @@ int main(int argc, char* argv[]) {
   const auto args = get_opts(argc, argv);
   if (!args) {
     const auto error_text = args.error_str();
-    const auto help_text = args.help_str();
+    const auto help_text = get_opts.help_str();
     // ...
   }
 
