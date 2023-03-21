@@ -3,7 +3,7 @@
  *
  * MIT License
  *
- * Copyright (c) 2022 Felix Jones
+ * Copyright (c) 2022-2023 Felix Jones
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -259,8 +259,8 @@ namespace ctopt {
             }
 
             T value{};
-            auto [ptr, ec] { std::from_chars(sv.cbegin(), sv.cend(), value) };
-            if (ptr == sv.cend()) {
+            auto [ptr, ec] { std::from_chars(std::to_address(sv.cbegin()), std::to_address(sv.cend()), value) };
+            if (ptr == std::to_address(sv.cend())) {
                 return value;
             }
 
@@ -558,7 +558,7 @@ namespace ctopt {
         template <bool NoError, std::size_t N>
         friend struct parser;
 
-        template <std::size_t N>
+        template <bool NoError, std::size_t N>
         friend struct detail::parse_context;
 
         [[nodiscard]]
@@ -898,7 +898,7 @@ namespace ctopt {
                     return std::make_pair(opts, key.substr(ii));
                 }
 
-                opts.push_back(&*iter);
+                opts.push_back(std::to_address(iter));
             }
 
             return std::make_pair(opts, std::string_view{});
