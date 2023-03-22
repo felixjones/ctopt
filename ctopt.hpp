@@ -1024,7 +1024,8 @@ namespace ctopt {
                     }
 
                     if (!option.m_defaultValue.empty()) {
-                        m_elementValues.emplace(&option, std::vector<std::string>(1, std::string{option.m_defaultValue}));
+                        m_currentOption = &option;
+                        on_map_arg(option.m_defaultValue);
                     }
                 }
 
