@@ -917,7 +917,10 @@ namespace ctopt {
                 [[maybe_unused]]
                 const auto originalArg = arg;
 
-                if (m_currentOption) {
+                // Expecting key
+                const auto type = std::min(arg.find_first_not_of('-'), std::string_view::size_type{2});
+
+                if (m_currentOption && !type) {
                     // Expecting value
                     if (m_currentOption->m_max > 1 && !m_currentOption->m_flagCounter) {
                         auto& values = m_elementValues[m_currentOption];
@@ -929,9 +932,6 @@ namespace ctopt {
                     }
                     return on_arg(arg);
                 }
-
-                // Expecting key
-                const auto type = std::min(arg.find_first_not_of('-'), std::string_view::size_type{2});
 
                 if (type == 1) {
                     const auto key = arg.substr(1);
