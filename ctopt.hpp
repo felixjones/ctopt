@@ -258,10 +258,30 @@ namespace ctopt {
                 return {};
             }
 
-            T value{};
-            auto [ptr, ec] { std::from_chars(std::to_address(sv.cbegin()), std::to_address(sv.cend()), value) };
-            if (ptr == std::to_address(sv.cend())) {
-                return value;
+            if constexpr (std::same_as<T, float>) {
+                std::size_t ptr{};
+                auto value = std::stof(std::string(sv.data(), sv.size()), &ptr);
+                if (ptr == sv.size()) {
+                    return value;
+                }
+            } else if constexpr (std::same_as<T, double>) {
+                std::size_t ptr{};
+                auto value = std::stod(std::string(sv.data(), sv.size()), &ptr);
+                if (ptr == sv.size()) {
+                    return value;
+                }
+            } else if constexpr (std::same_as<T, long double>) {
+                std::size_t ptr{};
+                auto value = std::stold(std::string(sv.data(), sv.size()), &ptr);
+                if (ptr == sv.size()) {
+                    return value;
+                }
+            } else {
+                T value{};
+                auto [ptr, ec] {std::from_chars(std::to_address(sv.cbegin()), std::to_address(sv.cend()), value)};
+                if (ptr == std::to_address(sv.cend())) {
+                    return value;
+                }
             }
 
             return {};
