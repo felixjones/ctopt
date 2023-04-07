@@ -240,8 +240,8 @@ namespace ctopt {
             }
 
             int value{};
-            auto [ptr, ec] { std::from_chars(&sv.front(), &sv.back(), value) };
-            if (ptr == &sv.back()) {
+            auto [ptr, ec] {std::from_chars(std::to_address(sv.cbegin()), std::to_address(sv.cend()), value)};
+            if (ptr == std::to_address(sv.cend())) {
                 return bool(value);
             }
 
