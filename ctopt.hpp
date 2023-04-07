@@ -986,7 +986,15 @@ namespace ctopt {
                 if (m_currentOption) {
                     if (m_currentOption->m_flagCounter) {
                         // We can immediately handle flag counters
-                        m_counterValues[m_currentOption] += 1;
+                        if (!arg.empty()) {
+                            auto c = from_string<std::size_t>(arg);
+                            if (!c) {
+                                c = from_string<bool>(arg);
+                            }
+                            m_counterValues[m_currentOption] += c;
+                        } else {
+                            m_counterValues[m_currentOption] += 1;
+                        }
                         m_currentOption = nullptr;
                     } else if (!arg.empty() && !on_arg(arg)) {
                         return false;
