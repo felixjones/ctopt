@@ -887,18 +887,18 @@ namespace ctopt {
         template <std::size_t N>
         auto get_long_option(const std::array<option, N>& options, std::string_view key) noexcept -> std::pair<const option*, std::string_view> {
             for (const auto& option : options) {
-                const auto keyEnd = key.find_first_not_of(option.long_name);
-                if (keyEnd == std::string_view::npos) {
-                    // Only key
-                    return std::make_pair(&option, std::string_view{});
-                }
-
-                if (keyEnd != option.long_name.size()) {
+                const auto keyEnd = key.find(option.long_name);
+                if (keyEnd) {
                     continue;
                 }
 
-                if (key[keyEnd] == '=') {
-                    return std::make_pair(&option, key.substr(keyEnd + 1));
+                const auto rest = key.substr(option.long_name.size());
+                if (rest.empty()) {
+                    return std::make_pair(&option, std::string_view{});
+                } else if (rest.starts_with('=')) {
+                    return std::make_pair(&option, rest.substr(1));
+                } else {
+                    continue;
                 }
             }
 
